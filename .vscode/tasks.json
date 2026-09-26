@@ -11,9 +11,9 @@
         "-bt=dos",
         "-l=dos4g",
         "-i${env:WATCOM}/h",
-        "-fo=release32\\obj\\main",
-        "-fe=release32\\bin\\main",
-        "src/main.c",
+        "-fo=release32\\obj\\git",
+        "-fe=release32\\bin\\git",
+        "src/git.c",
         "&&",
         "Copy-Item",
         "${env:WATCOM}/binw/dos4gw.exe",
@@ -31,10 +31,11 @@
       "args": [
         "-zq",
         "-bt=dos",
+        "-k16384",
         "-i${env:WATCOM}/h",
-        "-fo=release\\obj\\main",
-        "-fe=release\\bin\\main",
-        "src/main.c"
+        "-fo=release\\obj\\git",
+        "-fe=release\\bin\\git",
+        "src/git.c"
       ],
       "group": "build",
       "problemMatcher": []

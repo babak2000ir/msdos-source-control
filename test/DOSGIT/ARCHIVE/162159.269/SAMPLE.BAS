@@ -1,0 +1,2 @@
+Input A
+? A
