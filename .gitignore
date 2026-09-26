@@ -1,0 +1,14 @@
+# DOS build outputs
+/release/
+/release32/
+
+# Open Watcom compiler and linker artifacts
+*.obj
+*.err
+*.exe
+*.map
+*.sym
+*.lib
+*.lnk
+*.pch
+*.mk

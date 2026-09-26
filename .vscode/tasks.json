@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build DOS (32-bit, DOS4G)",
+      "type": "shell",
+      "dependsOn": "Prepare DOS build directories",
+      "command": "wcl386",
+      "args": [
+        "-zq",
+        "-bt=dos",
+        "-i${env:WATCOM}/h",
+        "-fo=release32\\obj\\main",
+        "-fe=release32\\bin\\main",
+        "src/main.c"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build DOS (16-bit real mode)",
+      "type": "shell",
+      "dependsOn": "Prepare DOS build directories",
+      "command": "wcl",
+      "args": [
+        "-zq",
+        "-bt=dos",
+        "-i${env:WATCOM}/h",
+        "-fo=release\\obj\\main",
+        "-fe=release\\bin\\main",
+        "src/main.c"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Prepare DOS build directories",
+      "type": "shell",
+      "command": "New-Item -ItemType Directory -Force -Path release/obj,release/bin,release32/obj,release32/bin",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build DOS (16-bit and 32-bit)",
+      "dependsOn": [
+        "Build DOS (16-bit real mode)",
+        "Build DOS (32-bit, DOS4G)"
+      ],
+      "dependsOrder": "sequence",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}
