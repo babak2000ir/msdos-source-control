@@ -9,10 +9,16 @@
       "args": [
         "-zq",
         "-bt=dos",
+        "-l=dos4g",
         "-i${env:WATCOM}/h",
         "-fo=release32\\obj\\main",
         "-fe=release32\\bin\\main",
-        "src/main.c"
+        "src/main.c",
+        "&&",
+        "Copy-Item",
+        "${env:WATCOM}/binw/dos4gw.exe",
+        "release32/bin/dos4gw.exe",
+        "-Force"
       ],
       "group": "build",
       "problemMatcher": []
