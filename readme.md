@@ -161,7 +161,7 @@ machine, in VS Code, as either:
 
 ## Why does this exist
 
-Because sometimes you just want to know what changed since lunch—and there's something strangely seductive about doing it on a machine that still boots to C:\>.
+Because sometimes you just want to know what changed since lunch—and there's something strangely seductive about doing it on a machine that still boots to <div style="background-color: black; color: white; padding: 10px;">`C:\>_`</div>
 
 Because some of us have a thing for old hardware.
 
