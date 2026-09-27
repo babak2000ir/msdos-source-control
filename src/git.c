@@ -146,61 +146,271 @@ static int copy_file_contents(const char *source, const char *destination)
     return succeeded;
 }
 
+/* ------------------------------------------------------------------- *
+ * Generic tree walker
+ *
+ * Every operation this tool needs (copying, deleting, checking "is
+ * there anything here", comparing two trees) boils down to the same
+ * walk: list a directory, skip "." / "..", optionally skip a few
+ * excluded names, recurse into subdirectories, and do *something*
+ * different with each file. Previously that walk was duplicated five
+ * times with a different body each time — any fix to the walking logic
+ * (exclusion rules, path building, error handling) had to be made in
+ * five places and was easy to get out of sync.
+ *
+ * walk_tree() below is that walk, written once. Each caller supplies a
+ * small set of callbacks describing what it wants done at each file /
+ * directory, plus which names to skip. The five original functions are
+ * now thin wrappers that just plug their callbacks into walk_tree().
+ * ------------------------------------------------------------------- */
+
+/* Return values for walk_tree() and its callbacks. */
+enum walk_result {
+    WALK_OK    = 0,  /* success / keep walking */
+    WALK_STOP  = 1,  /* not an error - stop the whole walk early (e.g. "found it") */
+    WALK_ERROR = -1  /* something failed - abort the whole walk */
+};
+
+typedef int (*walk_file_callback)(const char *full_path, const char *relative_path,
+                                   const struct find_t *entry, void *context);
+typedef int (*walk_directory_callback)(const char *full_path, const char *relative_path,
+                                        const struct find_t *entry, void *context);
+
+/*
+ * Describes one walk: what to skip, what to do, and where to stash
+ * caller-specific state (the `context` pointer, passed back untouched
+ * to every callback).
+ *
+ * excluded_at_root: NULL-terminated list of names to skip, but only at
+ *   the walk's top level (e.g. don't recurse into the "dosgit" snapshot
+ *   folder from the project root - but a folder that happens to be
+ *   called "dosgit" nested three levels down is none of our business).
+ * excluded_always: NULL-terminated list of names to skip at every
+ *   depth (e.g. never touch "git.exe" itself, wherever it turns up).
+ *
+ * on_directory_enter fires before descending into a subdirectory;
+ * on_directory_leave fires after its whole contents have been walked.
+ * Either may be NULL to skip that hook - useful since some operations
+ * only care about one side (e.g. copying creates directories on the
+ * way in, deleting removes them on the way out).
+ */
+typedef struct {
+    const char **excluded_at_root;
+    const char **excluded_always;
+    void *context;
+    walk_file_callback on_file;
+    walk_directory_callback on_directory_enter;
+    walk_directory_callback on_directory_leave;
+} walk_callbacks_t;
+
+/* True if `name` (case-insensitive) appears in a NULL-terminated list. */
+static int name_is_excluded(const char *name, const char **excluded_names)
+{
+    if (excluded_names == NULL) {
+        return 0;
+    }
+    while (*excluded_names != NULL) {
+        if (stricmp(name, *excluded_names) == 0) {
+            return 1;
+        }
+        excluded_names++;
+    }
+    return 0;
+}
+
+/*
+ * Walks `directory` depth-first, invoking `callbacks` for every entry
+ * found. `relative_directory` is the path built up so far, relative to
+ * the walk's root (empty string at the top) - this is what callbacks
+ * receive so they can locate the "same" file in another tree (e.g. the
+ * snapshot, or a copy destination) without needing their own recursion.
+ * `depth` is 0 at the root, incrementing with each subdirectory, and is
+ * what makes excluded_at_root apply only at the very top.
+ */
+static int walk_tree(const char *directory, const char *relative_directory,
+                      int depth, const walk_callbacks_t *callbacks)
+{
+    struct find_t entry;
+    char full_path[MAX_PATH_LENGTH];
+    char relative_path[MAX_PATH_LENGTH];
+    int outcome;
+
+    if (!find_first_entry(directory, &entry)) {
+        return WALK_OK;
+    }
+
+    outcome = WALK_OK;
+    do {
+        if (is_dot_entry(entry.name)) {
+            continue;
+        }
+        if (depth == 0 && name_is_excluded(entry.name, callbacks->excluded_at_root)) {
+            continue;
+        }
+        if (name_is_excluded(entry.name, callbacks->excluded_always)) {
+            continue;
+        }
+        if (!build_child_path(full_path, directory, entry.name)) {
+            outcome = WALK_ERROR;
+            break;
+        }
+        if (relative_directory[0] == '\0') {
+            strcpy(relative_path, entry.name);
+        } else if (!build_child_path(relative_path, relative_directory, entry.name)) {
+            outcome = WALK_ERROR;
+            break;
+        }
+
+        if ((entry.attrib & _A_SUBDIR) != 0) {
+            int enter_outcome;
+            int sub_outcome;
+
+            enter_outcome = WALK_OK;
+            if (callbacks->on_directory_enter != NULL) {
+                enter_outcome = callbacks->on_directory_enter(full_path, relative_path,
+                                                               &entry, callbacks->context);
+            }
+            if (enter_outcome != WALK_OK) {
+                outcome = enter_outcome;
+                break;
+            }
+
+            /* Recursion happens here, once, regardless of which
+             * operation is being performed - callers never write their
+             * own recursive call anymore. */
+            sub_outcome = walk_tree(full_path, relative_path, depth + 1, callbacks);
+            if (sub_outcome != WALK_OK) {
+                outcome = sub_outcome;
+                break;
+            }
+
+            if (callbacks->on_directory_leave != NULL) {
+                int leave_outcome = callbacks->on_directory_leave(full_path, relative_path,
+                                                                   &entry, callbacks->context);
+                if (leave_outcome != WALK_OK) {
+                    outcome = leave_outcome;
+                    break;
+                }
+            }
+        } else if (callbacks->on_file != NULL) {
+            int file_outcome = callbacks->on_file(full_path, relative_path, &entry,
+                                                   callbacks->context);
+            if (file_outcome != WALK_OK) {
+                outcome = file_outcome;
+                break;
+            }
+        }
+    } while (_dos_findnext(&entry) == 0);
+
+    return outcome;
+}
+
+/* ---- copy_directory_recursive: walk_tree callbacks + wrapper -------- */
+
+typedef struct {
+    const char *destination_base;
+} copy_context_t;
+
+static int copy_directory_visitor(const char *full_path, const char *relative_path,
+                                   const struct find_t *entry, void *context)
+{
+    copy_context_t *copy_context = (copy_context_t *)context;
+    char destination_path[MAX_PATH_LENGTH];
+
+    (void)full_path;
+    (void)entry;
+    if (!build_child_path(destination_path, copy_context->destination_base, relative_path)) {
+        return WALK_ERROR;
+    }
+    return create_directory_if_missing(destination_path) ? WALK_OK : WALK_ERROR;
+}
+
+static int copy_file_visitor(const char *full_path, const char *relative_path,
+                              const struct find_t *entry, void *context)
+{
+    copy_context_t *copy_context = (copy_context_t *)context;
+    char destination_path[MAX_PATH_LENGTH];
+
+    (void)entry;
+    if (!build_child_path(destination_path, copy_context->destination_base, relative_path)) {
+        return WALK_ERROR;
+    }
+    return copy_file_contents(full_path, destination_path) ? WALK_OK : WALK_ERROR;
+}
+
 /*
  * Recursively copies every file and subdirectory from `source` into
  * `destination`.
  *
- * `excluded_root_directory` / `excluded_file_name`: names to skip at this
- * level only (e.g. don't copy the "dosgit" snapshot folder or the
- * "git.exe" binary into a fresh snapshot). The exclusion is passed as
- * NULL on recursive calls so it only applies at the top level of the
- * tree being copied, not to every same-named entry found deeper down.
+ * `excluded_root_directory`: a name to skip, but only at the top level
+ * of `source` (e.g. don't copy the "dosgit" snapshot folder into a
+ * fresh snapshot of itself). `excluded_file_name`: a name to skip at
+ * every level (e.g. never copy "git.exe" itself).
  */
 static int copy_directory_recursive(const char *source, const char *destination,
                      const char *excluded_root_directory,
                      const char *excluded_file_name)
 {
-    struct find_t entry;
-    char source_path[MAX_PATH_LENGTH];
-    char destination_path[MAX_PATH_LENGTH];
-    int result;
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
+    const char *always_excludes[2];
+    copy_context_t context;
 
     if (!create_directory_if_missing(destination)) {
         return 0;
     }
-    if (!find_first_entry(source, &entry)) {
-        return 1;
+
+    root_excludes[0] = excluded_root_directory;
+    root_excludes[1] = NULL;
+    always_excludes[0] = excluded_file_name;
+    always_excludes[1] = NULL;
+    context.destination_base = destination;
+
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_always = always_excludes;
+    callbacks.context = &context;
+    callbacks.on_file = copy_file_visitor;
+    callbacks.on_directory_enter = copy_directory_visitor;
+
+    return walk_tree(source, "", 0, &callbacks) != WALK_ERROR;
+}
+
+/* ---- delete_directory_contents_recursive: callbacks + wrapper ------ */
+
+static int delete_file_visitor(const char *full_path, const char *relative_path,
+                                const struct find_t *entry, void *context)
+{
+    (void)relative_path;
+    (void)entry;
+    (void)context;
+
+    /* Clear read-only attribute first; otherwise remove() on a
+     * read-only file (e.g. one copied with its original attributes)
+     * would fail. */
+    chmod(full_path, S_IWRITE | S_IREAD);
+    if (remove(full_path) != 0) {
+        fprintf(stderr, "Cannot remove file: %s\n", full_path);
+        return WALK_ERROR;
     }
+    return WALK_OK;
+}
 
-    result = 1;
-    do {
-        if (is_dot_entry(entry.name) ||
-            (excluded_root_directory != NULL &&
-             stricmp(entry.name, excluded_root_directory) == 0) ||
-            (excluded_file_name != NULL &&
-             stricmp(entry.name, excluded_file_name) == 0)) {
-            continue;
-        }
-        if (!build_child_path(source_path, source, entry.name) ||
-            !build_child_path(destination_path, destination, entry.name)) {
-            result = 0;
-            continue;
-        }
+static int delete_directory_visitor(const char *full_path, const char *relative_path,
+                                     const struct find_t *entry, void *context)
+{
+    (void)relative_path;
+    (void)entry;
+    (void)context;
 
-        if ((entry.attrib & _A_SUBDIR) != 0) {
-            /* Note: excluded_root_directory is deliberately NOT passed
-             * down, so a same-named directory nested deeper is copied
-             * normally; only the top-level exclusion is meant to apply. */
-            if (!copy_directory_recursive(source_path, destination_path, NULL,
-                           excluded_file_name)) {
-                result = 0;
-            }
-        } else if (!copy_file_contents(source_path, destination_path)) {
-            result = 0;
-        }
-    } while (_dos_findnext(&entry) == 0);
-
-    return result;
+    /* This runs as on_directory_leave, i.e. after the subdirectory's
+     * own contents have already been walked (and deleted) - the
+     * directory is only rmdir'd once it's empty. */
+    if (rmdir(full_path) != 0) {
+        fprintf(stderr, "Cannot remove directory: %s\n", full_path);
+        return WALK_ERROR;
+    }
+    return WALK_OK;
 }
 
 /*
@@ -212,78 +422,69 @@ static int copy_directory_recursive(const char *source, const char *destination,
 static int delete_directory_contents_recursive(const char *directory,
                                 const char *excluded_root_directory)
 {
-    struct find_t entry;
-    char path[MAX_PATH_LENGTH];
-    int result;
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
 
-    if (!find_first_entry(directory, &entry)) {
-        return 1;
-    }
+    root_excludes[0] = excluded_root_directory;
+    root_excludes[1] = NULL;
 
-    result = 1;
-    do {
-        if (is_dot_entry(entry.name) ||
-            (excluded_root_directory != NULL &&
-             stricmp(entry.name, excluded_root_directory) == 0)) {
-            continue;
-        }
-        if (!build_child_path(path, directory, entry.name)) {
-            result = 0;
-            continue;
-        }
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.on_file = delete_file_visitor;
+    callbacks.on_directory_leave = delete_directory_visitor;
 
-        if ((entry.attrib & _A_SUBDIR) != 0) {
-            if (!delete_directory_contents_recursive(path, NULL) || rmdir(path) != 0) {
-                fprintf(stderr, "Cannot remove directory: %s\n", path);
-                result = 0;
-            }
-        } else {
-            /* Clear read-only attribute first; otherwise remove() on a
-             * read-only file (e.g. one copied with its original
-             * attributes) would fail. */
-            chmod(path, S_IWRITE | S_IREAD);
-            if (remove(path) != 0) {
-                fprintf(stderr, "Cannot remove file: %s\n", path);
-                result = 0;
-            }
-        }
-    } while (_dos_findnext(&entry) == 0);
+    return walk_tree(directory, "", 0, &callbacks) != WALK_ERROR;
+}
 
-    return result;
+/* ---- directory_has_any_file: callback + wrapper --------------------- */
+
+typedef struct {
+    int found;
+} has_any_file_context_t;
+
+static int has_any_file_visitor(const char *full_path, const char *relative_path,
+                                 const struct find_t *entry, void *context)
+{
+    has_any_file_context_t *found_context = (has_any_file_context_t *)context;
+
+    (void)full_path;
+    (void)relative_path;
+    (void)entry;
+
+    found_context->found = 1;
+    /* One file is enough to answer the question - stop walking instead
+     * of scanning the rest of a possibly large tree. */
+    return WALK_STOP;
 }
 
 /*
- * True if `directory` contains at least one real file anywhere below it.
- * Used to decide whether there's anything worth archiving/comparing yet
- * (an empty or brand-new snapshot folder doesn't need either).
- * `exclude_archive`, like the exclusion parameters above, only applies
- * at the top level of the recursion (passed as 0 on recursive calls).
+ * True if `directory` contains at least one real file anywhere below
+ * it. Used to decide whether there's anything worth archiving/
+ * comparing yet (an empty or brand-new snapshot folder doesn't need
+ * either). `exclude_archive` skips the "archive" folder, but only at
+ * the top level - see excluded_at_root above.
  */
 static int directory_has_any_file(const char *directory, int exclude_archive)
 {
-    struct find_t entry;
-    char path[MAX_PATH_LENGTH];
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
+    const char *always_excludes[2];
+    has_any_file_context_t context;
 
-    if (!find_first_entry(directory, &entry)) {
-        return 0;
-    }
+    root_excludes[0] = exclude_archive ? ARCHIVE_DIRECTORY : NULL;
+    root_excludes[1] = NULL;
+    always_excludes[0] = EXECUTABLE_NAME;
+    always_excludes[1] = NULL;
+    context.found = 0;
 
-    do {
-        if (is_dot_entry(entry.name) ||
-            (exclude_archive && stricmp(entry.name, ARCHIVE_DIRECTORY) == 0) ||
-            stricmp(entry.name, EXECUTABLE_NAME) == 0) {
-            continue;
-        }
-        if ((entry.attrib & _A_SUBDIR) == 0) {
-            return 1;
-        }
-        if (build_child_path(path, directory, entry.name) &&
-            directory_has_any_file(path, 0)) {
-            return 1;
-        }
-    } while (_dos_findnext(&entry) == 0);
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_always = always_excludes;
+    callbacks.context = &context;
+    callbacks.on_file = has_any_file_visitor;
 
-    return 0;
+    walk_tree(directory, "", 0, &callbacks);
+    return context.found;
 }
 
 /* Formats a time_t as "YYYY-MM-DD HH:MM:SS" for the status report columns. */
@@ -348,6 +549,47 @@ static void print_file_status_line(const char *status, const char *relative_path
            previous_size, current_date, current_size);
 }
 
+/* ---- report_new_and_changed_files: callback + wrapper --------------- */
+
+typedef struct {
+    const char *snapshot_base;
+} report_new_context_t;
+
+static int report_new_or_changed_visitor(const char *full_path, const char *relative_path,
+                                          const struct find_t *entry, void *context)
+{
+    report_new_context_t *report_context = (report_new_context_t *)context;
+    struct stat current_information;
+    struct stat snapshot_information;
+    char snapshot_path[MAX_PATH_LENGTH];
+
+    (void)entry;
+
+    if (stat(full_path, &current_information) != 0) {
+        fprintf(stderr, "Cannot inspect file: %s\n", full_path);
+        return WALK_ERROR;
+    }
+    if (!build_child_path(snapshot_path, report_context->snapshot_base, relative_path)) {
+        return WALK_ERROR;
+    }
+
+    if (stat(snapshot_path, &snapshot_information) != 0) {
+        print_file_status_line("NEW", relative_path, NULL, &current_information);
+    } else if (snapshot_information.st_size != current_information.st_size ||
+               snapshot_information.st_mtime != current_information.st_mtime) {
+        /* Key decision point: "changed" is decided purely by size and
+         * mtime, never by actual content comparison. A file edited
+         * and saved back with the exact same size/timestamp (or one
+         * merely touched without content changes) can be misreported. */
+        print_file_status_line("CHANGED", relative_path, &snapshot_information,
+                         &current_information);
+    } else {
+        print_file_status_line("UNCHANGED", relative_path, &snapshot_information,
+                         &current_information);
+    }
+    return WALK_OK;
+}
+
 /*
  * Walks the CURRENT (working) tree and reports every file as NEW (not
  * present in the snapshot) or CHANGED/UNCHANGED (present in the
@@ -357,66 +599,55 @@ static void print_file_status_line(const char *status, const char *relative_path
  */
 static int report_new_and_changed_files(const char *current_directory,
                                 const char *snapshot_directory,
-                                const char *relative_directory,
                                 int exclude_dosgit)
 {
-    struct find_t entry;
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
+    const char *always_excludes[2];
+    report_new_context_t context;
+
+    root_excludes[0] = exclude_dosgit ? DOSGIT_DIRECTORY : NULL;
+    root_excludes[1] = NULL;
+    always_excludes[0] = EXECUTABLE_NAME;
+    always_excludes[1] = NULL;
+    context.snapshot_base = snapshot_directory;
+
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_always = always_excludes;
+    callbacks.context = &context;
+    callbacks.on_file = report_new_or_changed_visitor;
+
+    return walk_tree(current_directory, "", 0, &callbacks) != WALK_ERROR;
+}
+
+/* ---- report_deleted_files: callback + wrapper ------------------------ */
+
+typedef struct {
+    const char *current_base;
+} report_deleted_context_t;
+
+static int report_deleted_visitor(const char *full_path, const char *relative_path,
+                                   const struct find_t *entry, void *context)
+{
+    report_deleted_context_t *report_context = (report_deleted_context_t *)context;
     struct stat current_information;
     struct stat snapshot_information;
     char current_path[MAX_PATH_LENGTH];
-    char snapshot_path[MAX_PATH_LENGTH];
-    char relative_path[MAX_PATH_LENGTH];
-    int result;
 
-    if (!find_first_entry(current_directory, &entry)) {
-        return 1;
+    (void)entry;
+
+    if (!build_child_path(current_path, report_context->current_base, relative_path)) {
+        return WALK_ERROR;
     }
-
-    result = 1;
-    do {
-        if (is_dot_entry(entry.name) ||
-            (exclude_dosgit && stricmp(entry.name, DOSGIT_DIRECTORY) == 0) ||
-            stricmp(entry.name, EXECUTABLE_NAME) == 0) {
-            continue;
-        }
-        if (!build_child_path(current_path, current_directory, entry.name) ||
-            !build_child_path(snapshot_path, snapshot_directory, entry.name)) {
-            result = 0;
-            continue;
-        }
-        if (relative_directory[0] == '\0') {
-            strcpy(relative_path, entry.name);
-        } else if (!build_child_path(relative_path, relative_directory, entry.name)) {
-            result = 0;
-            continue;
-        }
-
-        if ((entry.attrib & _A_SUBDIR) != 0) {
-            if (!report_new_and_changed_files(current_path, snapshot_path,
-                                      relative_path, 0)) {
-                result = 0;
-            }
-        } else if (stat(current_path, &current_information) != 0) {
-            fprintf(stderr, "Cannot inspect file: %s\n", current_path);
-            result = 0;
-        } else if (stat(snapshot_path, &snapshot_information) != 0) {
-            print_file_status_line("NEW", relative_path, NULL,
-                             &current_information);
-        } else if (snapshot_information.st_size != current_information.st_size ||
-                   snapshot_information.st_mtime != current_information.st_mtime) {
-            /* Key decision point: "changed" is decided purely by size and
-             * mtime, never by actual content comparison. A file edited
-             * and saved back with the exact same size/timestamp (or one
-             * merely touched without content changes) can be misreported. */
-            print_file_status_line("CHANGED", relative_path, &snapshot_information,
-                             &current_information);
-        } else {
-            print_file_status_line("UNCHANGED", relative_path, &snapshot_information,
-                             &current_information);
-        }
-    } while (_dos_findnext(&entry) == 0);
-
-    return result;
+    if (stat(current_path, &current_information) == 0) {
+        return WALK_OK; /* still exists on the current side - nothing to report */
+    }
+    if (stat(full_path, &snapshot_information) != 0) {
+        return WALK_ERROR;
+    }
+    print_file_status_line("DELETED", relative_path, &snapshot_information, NULL);
+    return WALK_OK;
 }
 
 /*
@@ -428,57 +659,26 @@ static int report_new_and_changed_files(const char *current_directory,
  */
 static int report_deleted_files(const char *snapshot_directory,
                                 const char *current_directory,
-                                const char *relative_directory,
                                 int exclude_archive)
 {
-    struct find_t entry;
-    struct stat snapshot_information;
-    char snapshot_path[MAX_PATH_LENGTH];
-    char current_path[MAX_PATH_LENGTH];
-    char relative_path[MAX_PATH_LENGTH];
-    int result;
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
+    const char *always_excludes[2];
+    report_deleted_context_t context;
 
-    if (!find_first_entry(snapshot_directory, &entry)) {
-        return 1;
-    }
+    root_excludes[0] = exclude_archive ? ARCHIVE_DIRECTORY : NULL;
+    root_excludes[1] = NULL;
+    always_excludes[0] = EXECUTABLE_NAME;
+    always_excludes[1] = NULL;
+    context.current_base = current_directory;
 
-    result = 1;
-    do {
-        if (is_dot_entry(entry.name) ||
-            (exclude_archive && stricmp(entry.name, ARCHIVE_DIRECTORY) == 0) ||
-            stricmp(entry.name, EXECUTABLE_NAME) == 0) {
-            continue;
-        }
-        if (!build_child_path(snapshot_path, snapshot_directory, entry.name) ||
-            !build_child_path(current_path, current_directory, entry.name)) {
-            result = 0;
-            continue;
-        }
-        if (relative_directory[0] == '\0') {
-            strcpy(relative_path, entry.name);
-        } else if (!build_child_path(relative_path, relative_directory, entry.name)) {
-            result = 0;
-            continue;
-        }
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_always = always_excludes;
+    callbacks.context = &context;
+    callbacks.on_file = report_deleted_visitor;
 
-        if ((entry.attrib & _A_SUBDIR) != 0) {
-            if (!report_deleted_files(snapshot_path, current_path,
-                                      relative_path, 0)) {
-                result = 0;
-            }
-        } else if (stat(current_path, &snapshot_information) != 0) {
-            /* current_path doesn't exist -> re-stat the snapshot copy
-             * (reusing snapshot_information) so its date/size can be shown. */
-            if (stat(snapshot_path, &snapshot_information) == 0) {
-                print_file_status_line("DELETED", relative_path,
-                                 &snapshot_information, NULL);
-            } else {
-                result = 0;
-            }
-        }
-    } while (_dos_findnext(&entry) == 0);
-
-    return result;
+    return walk_tree(snapshot_directory, "", 0, &callbacks) != WALK_ERROR;
 }
 
 /*
@@ -617,8 +817,8 @@ int main(int argc, char **argv)
            "PREV SIZE", "NEW DATE", "NEW SIZE");
     /* Two separate passes: current tree (new/changed/unchanged), then
      * snapshot tree (deleted) — see the comments on each function. */
-    if (!report_new_and_changed_files(root, dosgit, "", 1)) {
+    if (!report_new_and_changed_files(root, dosgit, 1)) {
         return 1;
     }
-    return report_deleted_files(dosgit, root, "", 1) ? 0 : 1;
+    return report_deleted_files(dosgit, root, 1) ? 0 : 1;
 }
