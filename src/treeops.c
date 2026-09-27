@@ -1,6 +1,7 @@
 #include <direct.h>
 #include <io.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -31,6 +32,7 @@ const char *excluded_executable[] = { EXECUTABLE_NAME, NULL };
 
 typedef struct {
     const char *destination_base;
+    char *buffer;
 } copy_context_t;
 
 static int copy_directory_visitor(const char *full_path, const char *relative_path,
@@ -55,7 +57,8 @@ static int copy_file_visitor(const char *full_path, const char *relative_path,
     if (!build_child_path(destination_path, copy_context->destination_base, relative_path)) {
         return WALK_ERROR;
     }
-    return copy_file_contents(full_path, destination_path) ? WALK_OK : WALK_ERROR;
+        return copy_file_contents(full_path, destination_path, copy_context->buffer) ?
+            WALK_OK : WALK_ERROR;
 }
 
 /*
@@ -75,12 +78,18 @@ int copy_directory_recursive(const char *source, const char *destination,
     const char *root_excludes[2];
     const char *always_excludes[2];
     copy_context_t context;
+    int outcome;
 
     if (!create_directory_if_missing(destination)) {
         return 0;
     }
 
     context.destination_base = destination;
+    context.buffer = (char *)malloc(COPY_BUFFER_SIZE);
+    if (context.buffer == NULL) {
+        fprintf(stderr, "Not enough memory to copy files.\n");
+        return 0;
+    }
 
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.excluded_at_root = single_name_exclude_list(root_excludes, excluded_root_directory);
@@ -89,7 +98,9 @@ int copy_directory_recursive(const char *source, const char *destination,
     callbacks.on_file = copy_file_visitor;
     callbacks.on_directory_enter = copy_directory_visitor;
 
-    return walk_tree(source, "", 0, &callbacks) != WALK_ERROR;
+    outcome = walk_tree(source, "", 0, &callbacks);
+    free(context.buffer);
+    return outcome != WALK_ERROR;
 }
 
 /* ---- delete_directory_contents_recursive: callbacks + wrapper ------ */
@@ -179,6 +190,7 @@ int directory_has_any_file(const char *directory, int exclude_archive)
     walk_callbacks_t callbacks;
     const char *root_excludes[2];
     has_any_file_context_t context;
+    int outcome;
 
     context.found = 0;
 
@@ -189,6 +201,9 @@ int directory_has_any_file(const char *directory, int exclude_archive)
     callbacks.context = &context;
     callbacks.on_file = has_any_file_visitor;
 
-    walk_tree(directory, "", 0, &callbacks);
+    outcome = walk_tree(directory, "", 0, &callbacks);
+    if (outcome == WALK_ERROR) {
+        return -1;
+    }
     return context.found;
 }

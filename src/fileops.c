@@ -1,6 +1,5 @@
 #include <dos.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #include "dosgit.h"
 #include "fileops.h"
@@ -10,11 +9,10 @@
  * destination. This timestamp preservation is what later lets the
  * comparison functions trust st_mtime as a proxy for "file changed".
  */
-int copy_file_contents(const char *source, const char *destination)
+int copy_file_contents(const char *source, const char *destination, char *buffer)
 {
     FILE *input;
     FILE *output;
-    char *buffer;
     size_t bytes_read;
     int succeeded;
     unsigned file_date;
@@ -29,14 +27,6 @@ int copy_file_contents(const char *source, const char *destination)
     output = fopen(destination, "wb");
     if (output == NULL) {
         fprintf(stderr, "Cannot write file: %s\n", destination);
-        fclose(input);
-        return 0;
-    }
-
-    buffer = (char *)malloc(COPY_BUFFER_SIZE);
-    if (buffer == NULL) {
-        fprintf(stderr, "Not enough memory to copy: %s\n", source);
-        fclose(output);
         fclose(input);
         return 0;
     }
@@ -61,7 +51,6 @@ int copy_file_contents(const char *source, const char *destination)
         _dos_setftime(fileno(output), file_date, file_time);
     }
 
-    free(buffer);
     if (fclose(output) != 0) {
         succeeded = 0;
     }

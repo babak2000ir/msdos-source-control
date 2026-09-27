@@ -5,6 +5,8 @@
 #include "paths.h"
 #include "treewalk.h"
 
+#define DOS_ERROR_NO_MORE_FILES 18
+
 /* ------------------------------------------------------------------- *
  * Generic tree walker
  *
@@ -28,15 +30,15 @@
  * find-first/find-next). Matches all attribute types (normal, read-only,
  * hidden, system, subdirectory) so nothing is silently skipped.
  */
-static int find_first_entry(const char *directory, struct find_t *entry)
+static unsigned find_first_entry(const char *directory, struct find_t *entry)
 {
     char pattern[MAX_PATH_LENGTH];
 
     if (!build_child_path(pattern, directory, "*.*")) {
-        return 0;
+        return 1;
     }
     return _dos_findfirst(pattern, _A_NORMAL | _A_RDONLY | _A_HIDDEN |
-                          _A_SYSTEM | _A_SUBDIR, entry) == 0;
+                          _A_SYSTEM | _A_SUBDIR, entry);
 }
 
 /* True if `name` (case-insensitive) appears in a NULL-terminated list. */
@@ -83,9 +85,14 @@ int walk_tree(const char *directory, const char *relative_directory,
     char full_path[MAX_PATH_LENGTH];
     char relative_path[MAX_PATH_LENGTH];
     int outcome;
+    unsigned search_error;
 
-    if (!find_first_entry(directory, &entry)) {
+    search_error = find_first_entry(directory, &entry);
+    if (search_error == DOS_ERROR_NO_MORE_FILES) {
         return WALK_OK;
+    }
+    if (search_error != 0) {
+        return WALK_ERROR;
     }
 
     outcome = WALK_OK;
@@ -149,7 +156,11 @@ int walk_tree(const char *directory, const char *relative_directory,
                 break;
             }
         }
-    } while (_dos_findnext(&entry) == 0);
+    } while ((search_error = _dos_findnext(&entry)) == 0);
+
+    if (outcome == WALK_OK && search_error != DOS_ERROR_NO_MORE_FILES) {
+        outcome = WALK_ERROR;
+    }
 
     return outcome;
 }

@@ -28,6 +28,7 @@ int commit_snapshot(const char *root, const char *dosgit)
     char archive_path[MAX_PATH_LENGTH];
     time_t now;
     struct tm *parts;
+    int has_previous_files;
 
     if (!create_directory_if_missing(dosgit) ||
         !build_child_path(archive, dosgit, ARCHIVE_DIRECTORY) ||
@@ -37,7 +38,12 @@ int commit_snapshot(const char *root, const char *dosgit)
 
     /* Decision point: only archive the old snapshot if it actually held
      * any files. On the very first commit there's nothing to preserve. */
-    if (directory_has_any_file(dosgit, 1)) {
+    has_previous_files = directory_has_any_file(dosgit, 1);
+    if (has_previous_files < 0) {
+        fprintf(stderr, "Cannot inspect previous snapshot: %s\n", dosgit);
+        return 0;
+    }
+    if (has_previous_files > 0) {
         now = time(NULL);
         parts = localtime(&now);
         if (parts == NULL) {

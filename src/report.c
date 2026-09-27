@@ -109,6 +109,21 @@ static int report_new_or_changed_visitor(const char *full_path, const char *rela
     return WALK_OK;
 }
 
+static int walk_report_files(const char *directory, const char *excluded_root,
+                             walk_file_callback on_file, void *context)
+{
+    walk_callbacks_t callbacks;
+    const char *root_excludes[2];
+
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes, excluded_root);
+    callbacks.excluded_always = excluded_executable;
+    callbacks.context = context;
+    callbacks.on_file = on_file;
+
+    return walk_tree(directory, "", 0, &callbacks) != WALK_ERROR;
+}
+
 /*
  * Walks the CURRENT (working) tree and reports every file as NEW (not
  * present in the snapshot) or CHANGED/UNCHANGED (present in the
@@ -120,20 +135,12 @@ static int report_new_and_changed_files(const char *current_directory,
                                 const char *snapshot_directory,
                                 int exclude_dosgit)
 {
-    walk_callbacks_t callbacks;
-    const char *root_excludes[2];
     report_new_context_t context;
 
     context.snapshot_base = snapshot_directory;
-
-    memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = single_name_exclude_list(root_excludes,
-                                     exclude_dosgit ? DOSGIT_DIRECTORY : NULL);
-    callbacks.excluded_always = excluded_executable;
-    callbacks.context = &context;
-    callbacks.on_file = report_new_or_changed_visitor;
-
-    return walk_tree(current_directory, "", 0, &callbacks) != WALK_ERROR;
+    return walk_report_files(current_directory,
+                             exclude_dosgit ? DOSGIT_DIRECTORY : NULL,
+                             report_new_or_changed_visitor, &context);
 }
 
 /* ---- report_deleted_files: callback + wrapper ------------------------ */
@@ -174,20 +181,12 @@ static int report_deleted_files(const char *snapshot_directory,
                                 const char *current_directory,
                                 int exclude_archive)
 {
-    walk_callbacks_t callbacks;
-    const char *root_excludes[2];
     report_deleted_context_t context;
 
     context.current_base = current_directory;
-
-    memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = single_name_exclude_list(root_excludes,
-                                     exclude_archive ? ARCHIVE_DIRECTORY : NULL);
-    callbacks.excluded_always = excluded_executable;
-    callbacks.context = &context;
-    callbacks.on_file = report_deleted_visitor;
-
-    return walk_tree(snapshot_directory, "", 0, &callbacks) != WALK_ERROR;
+    return walk_report_files(snapshot_directory,
+                             exclude_archive ? ARCHIVE_DIRECTORY : NULL,
+                             report_deleted_visitor, &context);
 }
 
 /* Prints the full status report of `root` against the snapshot in `dosgit`. */

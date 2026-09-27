@@ -21,6 +21,7 @@ int main(int argc, char **argv)
     int commit_requested;
     int index;
     int answer;
+    int has_snapshot_files;
 
     requested_path = NULL;
     commit_requested = 0;
@@ -67,7 +68,15 @@ int main(int argc, char **argv)
 
     /* If there's no usable snapshot yet, offer to create one before
      * doing any comparison (there'd be nothing meaningful to compare). */
-    if (!path_is_directory(dosgit) || !directory_has_any_file(dosgit, 1)) {
+    has_snapshot_files = 0;
+    if (path_is_directory(dosgit)) {
+        has_snapshot_files = directory_has_any_file(dosgit, 1);
+        if (has_snapshot_files < 0) {
+            fprintf(stderr, "Cannot inspect snapshot directory: %s\n", dosgit);
+            return 1;
+        }
+    }
+    if (!has_snapshot_files) {
         printf("No committed files were found. Commit first? [Y/N] ");
         fflush(stdout);
         answer = getchar();
