@@ -64,6 +64,9 @@ int commit_snapshot(const char *root, const char *dosgit)
                    EXECUTABLE_NAME)) {
             return 0;
         }
+        if (!write_hash_manifest(archive_path)) {
+            return 0;
+        }
     }
 
     /* Wipe the old snapshot contents (keeping the archive folder), then
@@ -74,6 +77,9 @@ int commit_snapshot(const char *root, const char *dosgit)
     }
     printf("Copying files into %s\n", dosgit);
     if (!copy_directory_recursive(root, dosgit, DOSGIT_DIRECTORY, EXECUTABLE_NAME)) {
+        return 0;
+    }
+    if (!write_hash_manifest(dosgit)) {
         return 0;
     }
     printf("Commit complete.\n");

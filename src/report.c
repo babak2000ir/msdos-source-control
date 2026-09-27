@@ -1,57 +1,93 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 
+#include "crc32.h"
 #include "dosgit.h"
 #include "paths.h"
 #include "report.h"
 #include "treewalk.h"
 
-/* Formats a time_t as "YYYY-MM-DD HH:MM:SS" for the status report columns. */
-static void format_timestamp(time_t value, char *result)
+static int hash_manifest_lookup(FILE *manifest, const char *relative_path,
+                                uint32 *result)
 {
-    struct tm *parts;
+    char line[MAX_PATH_LENGTH + 16];
+    char *tab;
+    char *hash_text;
+    char *suffix;
+    unsigned long hash;
+    int index;
+    int digit;
 
-    parts = localtime(&value);
-    if (parts == NULL) {
-        strcpy(result, "-------------------");
-        return;
+    if (fseek(manifest, 0L, SEEK_SET) != 0) {
+        return -1;
     }
-    strftime(result, 20, "%Y-%m-%d %H:%M:%S", parts);
+
+    while (fgets(line, sizeof(line), manifest) != NULL) {
+        if (strchr(line, '\n') == NULL && !feof(manifest)) {
+            return -1;
+        }
+        tab = strchr(line, '\t');
+        if (tab == NULL || tab == line) {
+            return -1;
+        }
+        *tab = '\0';
+        hash_text = tab + 1;
+        hash = 0;
+        for (index = 0; index < 8; ++index) {
+            if (hash_text[index] == '\0' || hash_text[index] == '\r' ||
+                hash_text[index] == '\n') {
+                return -1;
+            }
+            if (hash_text[index] >= '0' && hash_text[index] <= '9') {
+                digit = hash_text[index] - '0';
+            } else if (hash_text[index] >= 'A' && hash_text[index] <= 'F') {
+                digit = hash_text[index] - 'A' + 10;
+            } else if (hash_text[index] >= 'a' && hash_text[index] <= 'f') {
+                digit = hash_text[index] - 'a' + 10;
+            } else {
+                return -1;
+            }
+            hash = (hash << 4) | (unsigned long)digit;
+        }
+        suffix = hash_text + 8;
+        if (*suffix == '\r') {
+            ++suffix;
+        }
+        if (*suffix == '\n') {
+            ++suffix;
+        }
+        if (*suffix != '\0') {
+            return -1;
+        }
+        if (stricmp(line, relative_path) == 0) {
+            *result = (uint32)hash;
+            return 1;
+        }
+    }
+
+    return ferror(manifest) ? -1 : 0;
 }
 
-/*
- * Prints one row of the status report: a status word (NEW/CHANGED/
- * UNCHANGED/DELETED), the file's path (wrapped across lines if it's
- * longer than FILE_LINE_WIDTH), and the previous vs. current
- * timestamp/size. Either `previous` or `current` may be NULL (file
- * doesn't exist on that side), in which case dashes and -1 are shown.
- */
+/* Prints a status row and its previous/current hash values. */
 static void print_file_status_line(const char *status, const char *relative_path,
-                             const struct stat *previous,
-                             const struct stat *current)
+                                   const uint32 *previous,
+                                   const uint32 *current)
 {
-    char previous_date[20];
-    char current_date[20];
-    long previous_size;
-    long current_size;
+    char previous_hash[9];
+    char current_hash[9];
     size_t path_length;
     int chunk_length;
 
     if (previous != NULL) {
-        format_timestamp(previous->st_mtime, previous_date);
-        previous_size = previous->st_size;
+        sprintf(previous_hash, "%08lX", *previous);
     } else {
-        strcpy(previous_date, "-------------------");
-        previous_size = -1L;
+        strcpy(previous_hash, "--------");
     }
     if (current != NULL) {
-        format_timestamp(current->st_mtime, current_date);
-        current_size = current->st_size;
+        sprintf(current_hash, "%08lX", *current);
     } else {
-        strcpy(current_date, "-------------------");
-        current_size = -1L;
+        strcpy(current_hash, "--------");
     }
 
     path_length = strlen(relative_path);
@@ -66,26 +102,32 @@ static void print_file_status_line(const char *status, const char *relative_path
         printf("          %.*s\n", chunk_length, relative_path);
         relative_path += chunk_length;
     }
-    printf("          %s %10ld  %s %10ld\n", previous_date,
-           previous_size, current_date, current_size);
+    printf("          %14s  %14s\n", previous_hash, current_hash);
 }
 
 /* ---- report_new_and_changed_files: callback + wrapper --------------- */
 
 typedef struct {
     const char *snapshot_base;
+    FILE *manifest;
 } report_new_context_t;
 
 static int report_new_or_changed_visitor(const char *full_path, const char *relative_path,
                                           void *context)
 {
     report_new_context_t *report_context = (report_new_context_t *)context;
-    struct stat current_information;
     struct stat snapshot_information;
     char snapshot_path[MAX_PATH_LENGTH];
+    uint32 current_hash;
+    uint32 previous_hash;
+    int has_previous_hash;
 
-    if (stat(full_path, &current_information) != 0) {
-        fprintf(stderr, "Cannot inspect file: %s\n", full_path);
+    if (stricmp(relative_path, HASH_MANIFEST_NAME) == 0) {
+        return WALK_OK;
+    }
+
+    if (!crc32_file(full_path, &current_hash)) {
+        fprintf(stderr, "Cannot hash file: %s\n", full_path);
         return WALK_ERROR;
     }
     if (!build_child_path(snapshot_path, report_context->snapshot_base, relative_path)) {
@@ -93,18 +135,25 @@ static int report_new_or_changed_visitor(const char *full_path, const char *rela
     }
 
     if (stat(snapshot_path, &snapshot_information) != 0) {
-        print_file_status_line("NEW", relative_path, NULL, &current_information);
-    } else if (snapshot_information.st_size != current_information.st_size ||
-               snapshot_information.st_mtime != current_information.st_mtime) {
-        /* Key decision point: "changed" is decided purely by size and
-         * mtime, never by actual content comparison. A file edited
-         * and saved back with the exact same size/timestamp (or one
-         * merely touched without content changes) can be misreported. */
-        print_file_status_line("CHANGED", relative_path, &snapshot_information,
-                         &current_information);
+        print_file_status_line("NEW", relative_path, NULL, &current_hash);
     } else {
-        print_file_status_line("UNCHANGED", relative_path, &snapshot_information,
-                         &current_information);
+        has_previous_hash = hash_manifest_lookup(report_context->manifest,
+                                                 relative_path, &previous_hash);
+        if (has_previous_hash < 0) {
+            fprintf(stderr, "Invalid hash manifest.\n");
+            return WALK_ERROR;
+        }
+        if (has_previous_hash == 0) {
+            fprintf(stderr, "No hash found for snapshot file: %s\n", relative_path);
+            return WALK_ERROR;
+        }
+        if (previous_hash != current_hash) {
+            print_file_status_line("CHANGED", relative_path, &previous_hash,
+                                   &current_hash);
+        } else {
+            print_file_status_line("UNCHANGED", relative_path, &previous_hash,
+                                   &current_hash);
+        }
     }
     return WALK_OK;
 }
@@ -133,11 +182,13 @@ static int walk_report_files(const char *directory, const char *excluded_root,
  */
 static int report_new_and_changed_files(const char *current_directory,
                                 const char *snapshot_directory,
+                                FILE *manifest,
                                 int exclude_dosgit)
 {
     report_new_context_t context;
 
     context.snapshot_base = snapshot_directory;
+    context.manifest = manifest;
     return walk_report_files(current_directory,
                              exclude_dosgit ? DOSGIT_DIRECTORY : NULL,
                              report_new_or_changed_visitor, &context);
@@ -147,6 +198,7 @@ static int report_new_and_changed_files(const char *current_directory,
 
 typedef struct {
     const char *current_base;
+    FILE *manifest;
 } report_deleted_context_t;
 
 static int report_deleted_visitor(const char *full_path, const char *relative_path,
@@ -156,6 +208,12 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
     struct stat current_information;
     struct stat snapshot_information;
     char current_path[MAX_PATH_LENGTH];
+    uint32 previous_hash;
+    int has_previous_hash;
+
+    if (stricmp(relative_path, HASH_MANIFEST_NAME) == 0) {
+        return WALK_OK;
+    }
 
     if (!build_child_path(current_path, report_context->current_base, relative_path)) {
         return WALK_ERROR;
@@ -166,7 +224,17 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
     if (stat(full_path, &snapshot_information) != 0) {
         return WALK_ERROR;
     }
-    print_file_status_line("DELETED", relative_path, &snapshot_information, NULL);
+    has_previous_hash = hash_manifest_lookup(report_context->manifest,
+                                             relative_path, &previous_hash);
+    if (has_previous_hash < 0) {
+        fprintf(stderr, "Invalid hash manifest.\n");
+        return WALK_ERROR;
+    }
+    if (has_previous_hash == 0) {
+        fprintf(stderr, "No hash found for snapshot file: %s\n", relative_path);
+        return WALK_ERROR;
+    }
+    print_file_status_line("DELETED", relative_path, &previous_hash, NULL);
     return WALK_OK;
 }
 
@@ -179,11 +247,13 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
  */
 static int report_deleted_files(const char *snapshot_directory,
                                 const char *current_directory,
+                                FILE *manifest,
                                 int exclude_archive)
 {
     report_deleted_context_t context;
 
     context.current_base = current_directory;
+    context.manifest = manifest;
     return walk_report_files(snapshot_directory,
                              exclude_archive ? ARCHIVE_DIRECTORY : NULL,
                              report_deleted_visitor, &context);
@@ -192,13 +262,30 @@ static int report_deleted_files(const char *snapshot_directory,
 /* Prints the full status report of `root` against the snapshot in `dosgit`. */
 int report_status(const char *root, const char *dosgit)
 {
-    printf("STATUS    FILE\n");
-    printf("          %-19s %10s  %-19s %10s\n", "PREVIOUS DATE",
-           "PREV SIZE", "NEW DATE", "NEW SIZE");
-    /* Two separate passes: current tree (new/changed/unchanged), then
-     * snapshot tree (deleted) — see the comments on each function. */
-    if (!report_new_and_changed_files(root, dosgit, 1)) {
+    char manifest_path[MAX_PATH_LENGTH];
+    FILE *manifest;
+    int succeeded;
+
+    if (!build_child_path(manifest_path, dosgit, HASH_MANIFEST_NAME)) {
         return 0;
     }
-    return report_deleted_files(dosgit, root, 1);
+    manifest = fopen(manifest_path, "rb");
+    if (manifest == NULL) {
+        fprintf(stderr, "Cannot read hash manifest: %s. Commit again to create it.\n",
+                manifest_path);
+        return 0;
+    }
+
+    printf("STATUS    FILE\n");
+    printf("          %-14s  %-14s\n", "PREVIOUS HASH", "CURRENT HASH");
+    /* Two separate passes: current tree (new/changed/unchanged), then
+     * snapshot tree (deleted) — see the comments on each function. */
+    succeeded = report_new_and_changed_files(root, dosgit, manifest, 1);
+    if (succeeded) {
+        succeeded = report_deleted_files(dosgit, root, manifest, 1);
+    }
+    if (fclose(manifest) != 0) {
+        succeeded = 0;
+    }
+    return succeeded;
 }

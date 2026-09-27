@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "crc32.h"
 #include "dosgit.h"
 #include "fileops.h"
 #include "paths.h"
@@ -101,6 +102,71 @@ int copy_directory_recursive(const char *source, const char *destination,
     outcome = walk_tree(source, "", 0, &callbacks);
     free(context.buffer);
     return outcome != WALK_ERROR;
+}
+
+/* ---- write_hash_manifest: walker callback + wrapper ---------------- */
+
+typedef struct {
+    FILE *output;
+} hash_manifest_context_t;
+
+static int write_hash_manifest_visitor(const char *full_path,
+                                       const char *relative_path,
+                                       void *context)
+{
+    hash_manifest_context_t *manifest_context =
+        (hash_manifest_context_t *)context;
+    uint32 hash;
+
+    if (!crc32_file(full_path, &hash)) {
+        fprintf(stderr, "Cannot hash file: %s\n", full_path);
+        return WALK_ERROR;
+    }
+    if (fprintf(manifest_context->output, "%s\t%08lX\n",
+                relative_path, hash) < 0) {
+        fprintf(stderr, "Cannot write hash manifest.\n");
+        return WALK_ERROR;
+    }
+    return WALK_OK;
+}
+
+/* Writes one relative path and CRC-32 per archived file. */
+int write_hash_manifest(const char *directory)
+{
+    char manifest_path[MAX_PATH_LENGTH];
+    const char *root_excludes[3];
+    walk_callbacks_t callbacks;
+    hash_manifest_context_t context;
+    int outcome;
+    int succeeded;
+
+    if (!build_child_path(manifest_path, directory, HASH_MANIFEST_NAME)) {
+        return 0;
+    }
+    context.output = fopen(manifest_path, "wb");
+    if (context.output == NULL) {
+        fprintf(stderr, "Cannot write hash manifest: %s\n", manifest_path);
+        return 0;
+    }
+
+    memset(&callbacks, 0, sizeof(callbacks));
+    root_excludes[0] = ARCHIVE_DIRECTORY;
+    root_excludes[1] = HASH_MANIFEST_NAME;
+    root_excludes[2] = NULL;
+    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_always = excluded_executable;
+    callbacks.context = &context;
+    callbacks.on_file = write_hash_manifest_visitor;
+
+    outcome = walk_tree(directory, "", 0, &callbacks);
+    succeeded = outcome != WALK_ERROR;
+    if (fclose(context.output) != 0) {
+        succeeded = 0;
+    }
+    if (!succeeded) {
+        fprintf(stderr, "Cannot complete hash manifest: %s\n", manifest_path);
+    }
+    return succeeded;
 }
 
 /* ---- delete_directory_contents_recursive: callbacks + wrapper ------ */

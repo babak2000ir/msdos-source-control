@@ -20,13 +20,13 @@ as you work — and it will:
 
 - 📸 **Snapshot** your files into a hidden `DOSGIT\` folder (`-commit`)
 - 🔍 **Compare** your working files against the last snapshot
-- 🗃️ **Archive** the previous snapshot before replacing it, so nothing
-  is ever truly lost — just buried a little deeper
+- 🗃️ **Archive** the previous snapshot before replacing it, including a
+  per-file CRC-32 manifest, so nothing is ever truly lost - just buried a
+  little deeper.
 
-No content hashing, no diffing algorithms, no fancy branches yet
-(future plans). Just size + timestamp comparisons and good
-old-fashioned file copying. Simple enough to compile in the time it
-takes your machine to beep.
+No diffing algorithms, no fancy branches yet (future plans). Status
+checks compare file hashes recorded in the snapshot manifest. Simple
+enough to compile in the time it takes your machine to beep.
 
 ## Usage
 
@@ -69,17 +69,14 @@ DELETED   OLDSTUFF.C
 
 ## How it decides "changed"
 
-A file counts as **CHANGED** if its size or modified-time differs from
-the snapshot's copy — that's it. No byte-for-byte comparison. This
-means:
+A file counts as **CHANGED** if its CRC-32 hash differs from the value
+recorded in `DOSGIT\HASH`. Files with matching hashes are **UNCHANGED**
+even if their timestamps differ. New and deleted files are still
+identified by comparing which paths exist in the working tree and
+snapshot.
 
-- ⚡ It's fast. Practically instant on a directory of any size.
-- 🎭 It can be fooled. Touch a file without editing it, and `DOSGIT`
-  will still call it CHANGED. Edit content but preserve size *and*
-  timestamp (deliberately or by cosmic coincidence), and it'll call it
-  UNCHANGED.
-
-Basically: it trusts your filesystem's word for it. Very DOS of it.
+The manifest must exist and contain an entry for each snapshot file;
+commit once after upgrading an older snapshot to generate it.
 
 ## The archive
 
@@ -97,6 +94,12 @@ cryptic (8.3 if you know, you know).
 Each archive is a full copy, not a diff. Commit often and you'll build
 up quite the little museum of your project's past selves. Disk space:
 not included, sorry.
+
+`DOSGIT\HASH` contains a manifest of the current snapshot. Each line
+contains a relative path, a tab, and its eight-digit CRC-32 value. On
+later commits, that manifest is archived with the snapshot, and a fresh
+`DOSGIT\HASH` is generated for the new snapshot. Manifests exclude
+themselves and `git.exe`.
 
 ## Build
 
