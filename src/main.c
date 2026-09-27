@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "dosgit.h"
+#include "history.h"
 #include "paths.h"
 #include "report.h"
 #include "snapshot.h"
@@ -10,7 +11,7 @@
 
 static void print_usage(const char *program_name)
 {
-    printf("Usage: %s [-commit] [path]\n", program_name);
+    printf("Usage: %s [-commit|-history] [path]\n", program_name);
 }
 
 int main(int argc, char **argv)
@@ -19,15 +20,19 @@ int main(int argc, char **argv)
     char dosgit[MAX_PATH_LENGTH];
     const char *requested_path;
     int commit_requested;
+    int history_requested;
     int index;
     int answer;
     int has_snapshot_files;
 
     requested_path = NULL;
     commit_requested = 0;
+    history_requested = 0;
     for (index = 1; index < argc; ++index) {
         if (stricmp(argv[index], "-commit") == 0) {
             commit_requested = 1;
+        } else if (stricmp(argv[index], "-history") == 0) {
+            history_requested = 1;
         } else if (argv[index][0] == '-') {
             fprintf(stderr, "Unknown switch: %s\n", argv[index]);
             print_usage(argv[0]);
@@ -62,6 +67,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (commit_requested && history_requested) {
+        fprintf(stderr, "-commit and -history cannot be used together.\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (history_requested) {
+        return show_history(dosgit) ? 0 : 1;
+    }
     if (commit_requested) {
         return commit_snapshot(root, dosgit) ? 0 : 1;
     }

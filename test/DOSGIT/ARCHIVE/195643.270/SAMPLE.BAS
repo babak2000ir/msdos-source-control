@@ -1,0 +1,7 @@
+LOOPLABEL:
+PRINT "HI"
+INPUT "Next(Y/N)?", A$
+IF A$ = "Y" OR A$ = "y" THEN
+GOTO LOOPLABEL
+END IF
+

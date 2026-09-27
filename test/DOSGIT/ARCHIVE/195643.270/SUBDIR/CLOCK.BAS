@@ -1,0 +1,4 @@
+FOR i = 1 TO 100
+PRINT TIME$
+NEXT i
+

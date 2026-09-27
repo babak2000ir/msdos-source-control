@@ -2,174 +2,166 @@
 
 > Version control for the terminally nostalgic.
 
-If Git and a floppy disk had a very small child, this would be it.
+If Git and a floppy disk had a very small child who learned to live in a beige box and only understood 8.3 filenames, this would be it.
 
-`DOSGIT` is a tiny single-file C program that gives your DOS-era or
-retro-machine project something suspiciously like version control: a
-snapshot, a diff, and a timestamped archive.
+`DOSGIT` is a tiny MS-DOS utility for keeping a snapshot of a project directory, comparing the current tree against the last committed state, and archiving the old baseline before replacing it. It is intentionally simple, stubbornly retro, and a bit more charming than a proper VCS.
 
-**The split that matters:** you *run* `DOSGIT` on the MS-DOS box or
-retro machine where your source actually lives, to track it — but you
-*build* `DOSGIT` on a modern machine in VS Code. One machine for coding
-and versioning, another for compiling. More on that in [Build](#build).
+It runs on the retro machine where the source lives, but you build it on a modern Windows box in VS Code using Open Watcom. That is the modern-world compromise the project insists on. We do not negotiate with the BIOS.
 
-## What it actually does
+## What it does
 
-Point it at a directory — on your MS-DOS machine, tracking your source
-as you work — and it will:
+Point it at a directory and it will:
 
-- 📸 **Snapshot** your files into a hidden `DOSGIT\` folder (`-commit`)
-- 🔍 **Compare** your working files against the last snapshot
-- 🗃️ **Archive** the previous snapshot before replacing it, including a
-  per-file CRC-32 manifest, so nothing is ever truly lost - just buried a
-  little deeper.
+- 📸 create a snapshot in `dosgit\`
+- 🔍 compare the current directory against the last snapshot
+- 🗃️ archive the previous snapshot under `dosgit\archive\`
+- 🧮 record CRC-32 hashes for every file in `dosgit\HASH`
+- 🧾 show a status report with new, changed, unchanged, and deleted files
 
-No diffing algorithms, no fancy branches yet (future plans). Status
-checks compare file hashes recorded in the snapshot manifest. Simple
-enough to compile in the time it takes your machine to beep.
+There are no branches. There are no diffs. There is no Git drama. Just a snapshot, a manifest, and a full archive of the previous state. Very 1990s. Very efficient. Very suspiciously useful.
 
-## Usage
+## Command line
 
-Run these on the MS-DOS/retro machine, in the directory where your
-source lives:
+Run this on the DOS machine in the project directory:
 
-```
-git.exe [-commit] [path]
+```text
+git.exe [-commit | -history] [path]
 ```
 
-| Command | What happens |
+| Command | What it does |
 |---|---|
-| `git` | Compares the current directory against the last snapshot |
-| `git C:\PROJECT` | Compares a specific directory instead |
-| `git -commit` | Archives the old snapshot and takes a new one |
-| `git -commit C:\PROJECT` | Same, but for a specific directory |
+| `git` | Compares the current directory to the last committed snapshot |
+| `git C:\PROJECT` | Compares a specific directory instead of the current one |
+| `git -commit` | Archives the previous snapshot and writes a new one |
+| `git -commit C:\PROJECT` | Same, but for a specific project directory |
+| `git -history` | Lists archive folders from oldest to newest |
+| `git -history C:\PROJECT` | Lists archive history for a specific project |
 
-Run it with no snapshot yet, and it'll politely ask:
+If no snapshot exists yet, it does this:
 
-```
+```text
 No committed files were found. Commit first? [Y/N]
 ```
 
-Say yes. It's not going to judge you. (It might, quietly, in `stderr`.)
+If you answer `Y`, it commits immediately. If you answer `N`, it declines to do any comparison and returns a polite little failure. The program is not rude, but it is firm.
+
+## The DOS monitor look
+
+This is the sort of output you are meant to see in a real DOS session, ideally with ANSI colors enabled and a machine that still knows how to beep at the right moment.
+
+![DOSGIT monitor example](src/git%20monitor.PNG)
+
+That screenshot is a good example of the real behavior: there is a header, a list of files with a status word, and the previous/current hash for each file. The visual style is intentionally compact because DOS screens do not have time for your nonsense.
 
 ## Sample output
 
-```
+```text
 STATUS    FILE
-          PREVIOUS DATE       PREV SIZE  NEW DATE            NEW SIZE
-NEW       LEVEL3.C
-          -------------------        -1  2026-09-26 14:02:11       842
-CHANGED   MAIN.C
-          2026-09-20 09:15:03       512  2026-09-26 14:01:47       540
-UNCHANGED README.TXT
-          2026-09-01 08:00:00       128  2026-09-01 08:00:00       128
-DELETED   OLDSTUFF.C
-          2026-08-15 11:22:09       310  -------------------        -1
+          previous hash -> current hash
+new       LEVEL3.C
+          -------- -> 6B7E2A14
+changed   MAIN.C
+          42FC901A -> C3521F0B
+unchanged README.TXT
+          2A41D7E0 -> 2A41D7E0
+deleted   OLDSTUFF.C
+          8713AB20 -> --------
 ```
 
-## How it decides "changed"
+The status labels are exactly these:
 
-A file counts as **CHANGED** if its CRC-32 hash differs from the value
-recorded in `DOSGIT\HASH`. Files with matching hashes are **UNCHANGED**
-even if their timestamps differ. New and deleted files are still
-identified by comparing which paths exist in the working tree and
-snapshot.
+- `new` — the file is present in the working tree but not in the snapshot
+- `changed` — the file exists in both places, but the CRC-32 hash differs
+- `unchanged` — the file exists and the hash matches
+- `deleted` — the file existed in the snapshot but is gone in the current tree
 
-The manifest must exist and contain an entry for each snapshot file;
-commit once after upgrading an older snapshot to generate it.
+The display uses ANSI colors when available:
 
-## The archive
+- yellow for `new`
+- green for `unchanged`
+- blue for `changed`
+- red for `deleted`
 
-Every `-commit` after the first one archives the *entire* previous
-snapshot into:
+On DOS, this means `ANSI.SYS` in `CONFIG.SYS` is your friend if you want the colors to behave like a proper electronics showroom.
 
+## How the comparison works
+
+A file is considered changed if its CRC-32 value differs from the value stored in `dosgit\HASH`.
+
+The hash manifest is a simple text file. Each line looks like this:
+
+```text
+relative/path/to/file<TAB>8-digit-CRC32
 ```
-DOSGIT\ARCHIVE\HHMMSS.DDD\
+
+The program reads the current file, hashes it, and compares the value to the previous hash for that same relative path. If the path has been deleted, it reports `deleted`; if it is brand new, it reports `new`.
+
+The manifest intentionally excludes itself and the executable, because if it included those, the system would start explaining to itself why it is tracking the tracker. That would be a bizarre and unproductive use of CPU cycles.
+
+## Snapshot and archive rules
+
+The snapshot lives under `dosgit\` and is created by `-commit`.
+
+The current snapshot is copied to the archive before being replaced. Every new archive is named as:
+
+```text
+dosgit\archive\HHMMSS.DDD\
 ```
 
-where `DDD` is the day of the year — so `143205.269` means "2:32:05 PM
-on the 269th day of the year." Sortable, unique-ish, delightfully
-cryptic (8.3 if you know, you know).
+The `DDD` part is the day of the year, so a name like `143205.269` means roughly "2:32:05 PM on day 269 of the year." It is a compact DOS-era timestamp, which is both clever and a little bit cryptic. That is how the old-timers liked it.
 
-Each archive is a full copy, not a diff. Commit often and you'll build
-up quite the little museum of your project's past selves. Disk space:
-not included, sorry.
+Important detail: this is a full copy of the previous snapshot, not a diff. That means the archive folder is a museum of your project's past selves. Very useful. Very space-hungry. Very on-brand for a 90s programmer with a 500 MB drive and a dream.
 
-`DOSGIT\HASH` contains a manifest of the current snapshot. Each line
-contains a relative path, a tab, and its eight-digit CRC-32 value. On
-later commits, that manifest is archived with the snapshot, and a fresh
-`DOSGIT\HASH` is generated for the new snapshot. Manifests exclude
-themselves and `git.exe`.
+`git -history` lists those archive directories in date/time order, oldest first. For each archive after the first, it compares the archive to the previous one and prints the file differences. Then it compares the current `dosgit\` snapshot to the newest archive, so you can see what changed since that last saved state.
 
-## Build
+## Build it
 
-Even though `DOSGIT` *runs* on MS-DOS or a retro machine, you *build*
-it on a modern machine using [Open Watcom v2](https://github.com/open-watcom/open-watcom-v2/releases),
-a C compiler that targets MS-DOS but installs and runs fine on
-Windows, inside VS Code. (Open Watcom also ships a Fortran 77
-compiler! I'm not joking!)
+Even though the app runs on MS-DOS, you build it on a modern machine with [Open Watcom v2](https://github.com/open-watcom/open-watcom-v2/releases), which is a perfectly respectable way to cross-compile a DOS utility from Windows without becoming a hobbyist blacksmith.
 
 ### 1. Install Open Watcom v2
 
-- Go to the [Open Watcom v2 releases page](https://github.com/open-watcom/open-watcom-v2/releases)
-  on GitHub.
-- Download the latest Windows installer
-  (`open-watcom-c-x64-installer.exe` or similar).
-- Run it. The default install path is `C:\WATCOM` — keep it.
-- During install, make sure the **DOS target components** (16-bit and
-  32-bit DOS libraries/headers) are selected. They're usually checked
-  by default, but double-check.
+- Download the Windows installer from the Open Watcom v2 releases page
+- Install it to the default location, which is usually `C:\WATCOM`
+- Make sure the DOS target components are included; the 16-bit and 32-bit DOS bits are the part that matters
 
 ### 2. Set environment variables
 
-Open Watcom needs a few environment variables. The installer may set
-these for you, but verify them manually:
+Check these values:
 
-- `WATCOM` = `C:\WATCOM`
-- Add to `PATH`: `C:\WATCOM\binnt64` (or `C:\WATCOM\binnt` if you
-  installed the 32-bit tools)
-- `INCLUDE` = `C:\WATCOM\h`
+- `WATCOM=C:\WATCOM`
+- `INCLUDE=C:\WATCOM\h`
+- Add `C:\WATCOM\binnt64` (or `binnt`) to `PATH`
 
-To set these permanently on Windows 10/11:
-
-1. Search "Environment Variables" in the Start menu → "Edit the
-   system environment variables"
-2. Click "Environment Variables"
-3. Add/edit `WATCOM` and `INCLUDE`, and append the bin folder to
-   `PATH`
-
-Open a new terminal after this and verify with:
+Then verify with:
 
 ```powershell
 wcl386 -?
 ```
 
-You should see Open Watcom's compiler help output. If you get
-"command not found," recheck `PATH`.
+If you get help text, the toolchain is happy. If not, the machine is telling you to revisit your environment variables and stop making this harder than it needs to be.
 
-### 3. Install VS Code extensions
+### 3. Open in VS Code
 
-**C/C++** (Microsoft) — for syntax highlighting and IntelliSense
+The repo is already set up to build in a VS Code terminal. If you want to compile the DOS variants directly, the workspace includes build tasks for the 16-bit and 32-bit targets.
 
-## Runs on MS-DOS, builds either way
+## The short version
 
-`DOSGIT` runs natively under **MS-DOS** and compiles cleanly on a modern
-machine, in VS Code, as either:
+`DOSGIT` is basically:
 
-- 🕹️ **16-bit** — the classic real-mode build; should be good enough
-  for most retro setups
-- 🚀 **32-bit** — for DOS extenders or 386+ protected-mode setups, if
-  your project is huge and you'd like your nostalgia with a bit more
-  headroom
+- snapshot the project
+- compare it to the last snapshot
+- archive the previous one before replacing it
+- keep a CRC manifest so you know what changed
 
-## Why does this exist
+That is enough to make a retro project feel a bit more civilized without turning your `C:\` prompt into a Linux package manager.
 
-Because sometimes you just want to know what changed since lunch—and there's something strangely seductive about doing it on a machine that still boots to <div style="background-color: black; color: white; padding: 10px;">`C:\>_`</div>
+## Why this exists
 
-Because some of us have a thing for old hardware.
+Because some people like their source control small, local, and stubbornly offline.
 
-We refurbish vintage machines. We coax MS-DOS back to life. We whisper sweet nothings to Turbo C, Pascal, and even Visual Basic for DOS (Yeah! That's a thing!). Give us a beige case, a mechanical keyboard, and a blinking cursor, and suddenly we're feeling things we probably shouldn't admit in 
-polite company.
+Because sometimes you want to know what changed since lunch and the machine in the corner still boots to `C:\>_` like a champion.
+
+Because a dusty beige case, a mechanical keyboard, and a blinking cursor in Turbo C, Pascal, and even Visual Basic for DOS (Yeah! That's a thing!) makes some of us suddenly feeling things we probably shouldn't admit in polite company in a world that has become unreasonably shiny.
 
 ## License
 

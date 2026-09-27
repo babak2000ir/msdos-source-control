@@ -1,0 +1,33 @@
+ARCHIVE HISTORY
+===============
+
+[1/5] 170708.270  2026-09-27 17:07:08
+  initial archive (no previous archive)
+
+[2/5] 171205.270  2026-09-27 17:12:06
+  changes from 170708.270
+STATUS    FILE
+          previous hash -> current hash
+[1;34mchanged   SAMPLE.BAS
+          98024095 -> 81CEEE01[0m
+
+[3/5] 181718.270  2026-09-27 18:17:18
+  changes from 171205.270
+STATUS    FILE
+          previous hash -> current hash
+[33mnew       CIRCS.BAS
+          -------- -> F767DC2F[0m
+
+[4/5] 181956.270  2026-09-27 18:19:56
+  changes from 181718.270
+STATUS    FILE
+          previous hash -> current hash
+[1;34mchanged   CIRCS.BAS
+          F767DC2F -> 349848FC[0m
+
+[5/5] 195643.270  2026-09-27 19:56:42
+  changes from 181956.270
+STATUS    FILE
+          previous hash -> current hash
+[33mnew       SUBDIR\CLOCK.BAS
+          -------- -> A2B3CFCB[0m

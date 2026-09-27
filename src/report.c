@@ -8,6 +8,29 @@
 #include "report.h"
 #include "treewalk.h"
 
+#define ANSI_RESET "\x1B[0m"
+#define ANSI_YELLOW "\x1B[1;33m"
+#define ANSI_GREEN "\x1B[32m"
+#define ANSI_BLUE "\x1B[1;34m"
+#define ANSI_RED "\x1B[31m"
+
+static const char *status_color(const char *status)
+{
+    if (strcmp(status, "new") == 0) {
+        return ANSI_YELLOW;
+    }
+    if (strcmp(status, "unchanged") == 0) {
+        return ANSI_GREEN;
+    }
+    if (strcmp(status, "changed") == 0) {
+        return ANSI_BLUE;
+    }
+    if (strcmp(status, "deleted") == 0) {
+        return ANSI_RED;
+    }
+    return "";
+}
+
 static int hash_manifest_lookup(FILE *manifest, const char *relative_path,
                                 uint32 *result)
 {
@@ -69,6 +92,28 @@ static int hash_manifest_lookup(FILE *manifest, const char *relative_path,
     return ferror(manifest) ? -1 : 0;
 }
 
+static int is_hash_manifest_entry(const char *relative_path)
+{
+    return stricmp(relative_path, HASH_MANIFEST_NAME) == 0;
+}
+
+static int require_manifest_hash(FILE *manifest, const char *relative_path,
+                                uint32 *previous_hash)
+{
+    int has_previous_hash;
+
+    has_previous_hash = hash_manifest_lookup(manifest, relative_path, previous_hash);
+    if (has_previous_hash < 0) {
+        fprintf(stderr, "Invalid hash manifest.\n");
+        return 0;
+    }
+    if (has_previous_hash == 0) {
+        fprintf(stderr, "No hash found for snapshot file: %s\n", relative_path);
+        return 0;
+    }
+    return 1;
+}
+
 /* Prints a status row and its previous/current hash values. */
 static void print_file_status_line(const char *status, const char *relative_path,
                                    const uint32 *previous,
@@ -76,6 +121,7 @@ static void print_file_status_line(const char *status, const char *relative_path
 {
     char previous_hash[9];
     char current_hash[9];
+    const char *color;
     size_t path_length;
     int chunk_length;
 
@@ -90,10 +136,11 @@ static void print_file_status_line(const char *status, const char *relative_path
         strcpy(current_hash, "--------");
     }
 
+    color = status_color(status);
     path_length = strlen(relative_path);
     chunk_length = path_length > FILE_LINE_WIDTH ? FILE_LINE_WIDTH :
                    (int)path_length;
-    printf("%-9s %.*s\n", status, chunk_length, relative_path);
+    printf("%s%-9s %.*s\n", color, status, chunk_length, relative_path);
     relative_path += chunk_length;
     while (*relative_path != '\0') {
         path_length = strlen(relative_path);
@@ -102,7 +149,8 @@ static void print_file_status_line(const char *status, const char *relative_path
         printf("          %.*s\n", chunk_length, relative_path);
         relative_path += chunk_length;
     }
-    printf("          %14s  %14s\n", previous_hash, current_hash);
+        printf("          %8s -> %8s%s\n", previous_hash, current_hash,
+            *color != '\0' ? ANSI_RESET : "");
 }
 
 /* ---- report_new_and_changed_files: callback + wrapper --------------- */
@@ -110,6 +158,7 @@ static void print_file_status_line(const char *status, const char *relative_path
 typedef struct {
     const char *snapshot_base;
     FILE *manifest;
+    int include_unchanged;
 } report_new_context_t;
 
 static int report_new_or_changed_visitor(const char *full_path, const char *relative_path,
@@ -122,7 +171,7 @@ static int report_new_or_changed_visitor(const char *full_path, const char *rela
     uint32 previous_hash;
     int has_previous_hash;
 
-    if (stricmp(relative_path, HASH_MANIFEST_NAME) == 0) {
+    if (is_hash_manifest_entry(relative_path)) {
         return WALK_OK;
     }
 
@@ -135,23 +184,18 @@ static int report_new_or_changed_visitor(const char *full_path, const char *rela
     }
 
     if (stat(snapshot_path, &snapshot_information) != 0) {
-        print_file_status_line("NEW", relative_path, NULL, &current_hash);
+        print_file_status_line("new", relative_path, NULL, &current_hash);
     } else {
-        has_previous_hash = hash_manifest_lookup(report_context->manifest,
+        has_previous_hash = require_manifest_hash(report_context->manifest,
                                                  relative_path, &previous_hash);
-        if (has_previous_hash < 0) {
-            fprintf(stderr, "Invalid hash manifest.\n");
-            return WALK_ERROR;
-        }
-        if (has_previous_hash == 0) {
-            fprintf(stderr, "No hash found for snapshot file: %s\n", relative_path);
+        if (!has_previous_hash) {
             return WALK_ERROR;
         }
         if (previous_hash != current_hash) {
-            print_file_status_line("CHANGED", relative_path, &previous_hash,
+            print_file_status_line("changed", relative_path, &previous_hash,
                                    &current_hash);
-        } else {
-            print_file_status_line("UNCHANGED", relative_path, &previous_hash,
+        } else if (report_context->include_unchanged) {
+            print_file_status_line("unchanged", relative_path, &previous_hash,
                                    &current_hash);
         }
     }
@@ -183,14 +227,15 @@ static int walk_report_files(const char *directory, const char *excluded_root,
 static int report_new_and_changed_files(const char *current_directory,
                                 const char *snapshot_directory,
                                 FILE *manifest,
-                                int exclude_dosgit)
+                                const char *excluded_current_root,
+                                int include_unchanged)
 {
     report_new_context_t context;
 
     context.snapshot_base = snapshot_directory;
     context.manifest = manifest;
-    return walk_report_files(current_directory,
-                             exclude_dosgit ? DOSGIT_DIRECTORY : NULL,
+    context.include_unchanged = include_unchanged;
+    return walk_report_files(current_directory, excluded_current_root,
                              report_new_or_changed_visitor, &context);
 }
 
@@ -211,7 +256,7 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
     uint32 previous_hash;
     int has_previous_hash;
 
-    if (stricmp(relative_path, HASH_MANIFEST_NAME) == 0) {
+    if (is_hash_manifest_entry(relative_path)) {
         return WALK_OK;
     }
 
@@ -224,17 +269,12 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
     if (stat(full_path, &snapshot_information) != 0) {
         return WALK_ERROR;
     }
-    has_previous_hash = hash_manifest_lookup(report_context->manifest,
+    has_previous_hash = require_manifest_hash(report_context->manifest,
                                              relative_path, &previous_hash);
-    if (has_previous_hash < 0) {
-        fprintf(stderr, "Invalid hash manifest.\n");
+    if (!has_previous_hash) {
         return WALK_ERROR;
     }
-    if (has_previous_hash == 0) {
-        fprintf(stderr, "No hash found for snapshot file: %s\n", relative_path);
-        return WALK_ERROR;
-    }
-    print_file_status_line("DELETED", relative_path, &previous_hash, NULL);
+    print_file_status_line("deleted", relative_path, &previous_hash, NULL);
     return WALK_OK;
 }
 
@@ -248,25 +288,28 @@ static int report_deleted_visitor(const char *full_path, const char *relative_pa
 static int report_deleted_files(const char *snapshot_directory,
                                 const char *current_directory,
                                 FILE *manifest,
-                                int exclude_archive)
+                                const char *excluded_snapshot_root)
 {
     report_deleted_context_t context;
 
     context.current_base = current_directory;
     context.manifest = manifest;
-    return walk_report_files(snapshot_directory,
-                             exclude_archive ? ARCHIVE_DIRECTORY : NULL,
+    return walk_report_files(snapshot_directory, excluded_snapshot_root,
                              report_deleted_visitor, &context);
 }
 
-/* Prints the full status report of `root` against the snapshot in `dosgit`. */
-int report_status(const char *root, const char *dosgit)
+/* Compares two trees using the snapshot directory's HASH manifest. */
+int report_directories(const char *current_directory,
+                       const char *snapshot_directory,
+                       const char *excluded_current_root,
+                       const char *excluded_snapshot_root,
+                       int include_unchanged)
 {
     char manifest_path[MAX_PATH_LENGTH];
     FILE *manifest;
     int succeeded;
 
-    if (!build_child_path(manifest_path, dosgit, HASH_MANIFEST_NAME)) {
+    if (!build_child_path(manifest_path, snapshot_directory, HASH_MANIFEST_NAME)) {
         return 0;
     }
     manifest = fopen(manifest_path, "rb");
@@ -277,15 +320,25 @@ int report_status(const char *root, const char *dosgit)
     }
 
     printf("STATUS    FILE\n");
-    printf("          %-14s  %-14s\n", "PREVIOUS HASH", "CURRENT HASH");
+    printf("          previous hash -> current hash\n");
     /* Two separate passes: current tree (new/changed/unchanged), then
      * snapshot tree (deleted) — see the comments on each function. */
-    succeeded = report_new_and_changed_files(root, dosgit, manifest, 1);
+    succeeded = report_new_and_changed_files(current_directory, snapshot_directory,
+                                              manifest, excluded_current_root,
+                                              include_unchanged);
     if (succeeded) {
-        succeeded = report_deleted_files(dosgit, root, manifest, 1);
+        succeeded = report_deleted_files(snapshot_directory, current_directory,
+                                           manifest, excluded_snapshot_root);
     }
     if (fclose(manifest) != 0) {
         succeeded = 0;
     }
     return succeeded;
+}
+
+/* Prints the full status report of `root` against the snapshot in `dosgit`. */
+int report_status(const char *root, const char *dosgit)
+{
+    return report_directories(root, dosgit, DOSGIT_DIRECTORY,
+                              ARCHIVE_DIRECTORY, 1);
 }
