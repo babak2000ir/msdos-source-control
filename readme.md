@@ -70,10 +70,10 @@ deleted   OLDSTUFF.C
 
 The status labels are exactly these:
 
-- `new` — the file is present in the working tree but not in the snapshot
-- `changed` — the file exists in both places, but the CRC-32 hash differs
-- `unchanged` — the file exists and the hash matches
-- `deleted` — the file existed in the snapshot but is gone in the current tree
+- `new`: the file is present in the working tree but not in the snapshot
+- `changed`: the file exists in both places, but the CRC-32 hash differs
+- `unchanged`: the file exists and the hash matches
+- `deleted`: the file existed in the snapshot but is gone in the current tree
 
 The display uses ANSI colors when available:
 
@@ -166,4 +166,4 @@ Because a dusty beige case, a mechanical keyboard, and a blinking cursor in Turb
 ## License
 
 Do whatever you want with it. It's a few hundred lines of C and a lot
-of nostalgia — nobody's precious about it.
+of nostalgia, nobody's precious about it.

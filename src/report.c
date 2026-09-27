@@ -220,7 +220,7 @@ static int walk_report_files(const char *directory, const char *excluded_root,
 /*
  * Walks the CURRENT (working) tree and reports every file as NEW (not
  * present in the snapshot) or CHANGED/UNCHANGED (present in the
- * snapshot too). Deleted files are NOT detected here — that's handled
+ * snapshot too). Deleted files are NOT detected here, that's handled
  * separately by report_deleted_files(), which walks the snapshot
  * instead so it can see files that no longer exist on the current side.
  */
@@ -322,7 +322,7 @@ int report_directories(const char *current_directory,
     printf("STATUS    FILE\n");
     printf("          previous hash -> current hash\n");
     /* Two separate passes: current tree (new/changed/unchanged), then
-     * snapshot tree (deleted) — see the comments on each function. */
+     * snapshot tree (deleted). See the comments on each function. */
     succeeded = report_new_and_changed_files(current_directory, snapshot_directory,
                                               manifest, excluded_current_root,
                                               include_unchanged);

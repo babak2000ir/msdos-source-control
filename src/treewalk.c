@@ -14,12 +14,9 @@
  * there anything here", comparing two trees) boils down to the same
  * walk: list a directory, skip "." / "..", optionally skip a few
  * excluded names, recurse into subdirectories, and do *something*
- * different with each file. Previously that walk was duplicated five
- * times with a different body each time — any fix to the walking logic
- * (exclusion rules, path building, error handling) had to be made in
- * five places and was easy to get out of sync.
+ * different with each file.
  *
- * walk_tree() below is that walk, written once. Each caller supplies a
+ * walk_tree() below is the walk, written once. Each caller supplies a
  * small set of callbacks describing what it wants done at each file /
  * directory, plus which names to skip. The five original functions are
  * now thin wrappers that just plug their callbacks into walk_tree().
