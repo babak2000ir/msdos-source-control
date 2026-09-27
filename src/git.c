@@ -219,6 +219,36 @@ static int name_is_excluded(const char *name, const char **excluded_names)
 }
 
 /*
+ * The exclusion lists themselves, as data rather than scattered
+ * stricmp() checks. `git.exe` is excluded at every depth, everywhere -
+ * this one list is shared by every wrapper below instead of each one
+ * declaring its own copy of the same single-entry array.
+ *
+ * The "root" folder names (dosgit, archive) can't be a single shared
+ * constant the same way, because which one applies depends on which
+ * tree is being walked and whether a caller asked for it - so those are
+ * still built per call, via single_name_exclude_list() below. But the
+ * shape is the same: a plain data array walk_tree() consumes, not a
+ * code path. Adding something like a user-editable .dosgitignore later
+ * would mean changing how one of these arrays gets built, never
+ * touching walk_tree() or any of the callbacks.
+ */
+static const char *excluded_executable[] = { EXECUTABLE_NAME, NULL };
+
+/*
+ * Builds a one-name (or, if `name` is NULL, empty) NULL-terminated
+ * exclusion list into `storage` (which must have room for 2 entries)
+ * and returns it. This is the single place that turns "one optional
+ * name" into the array shape walk_tree() expects.
+ */
+static const char **single_name_exclude_list(const char *storage[2], const char *name)
+{
+    storage[0] = name;
+    storage[1] = NULL;
+    return storage;
+}
+
+/*
  * Walks `directory` depth-first, invoking `callbacks` for every entry
  * found. `relative_directory` is the path built up so far, relative to
  * the walk's root (empty string at the top) - this is what callbacks
@@ -360,15 +390,11 @@ static int copy_directory_recursive(const char *source, const char *destination,
         return 0;
     }
 
-    root_excludes[0] = excluded_root_directory;
-    root_excludes[1] = NULL;
-    always_excludes[0] = excluded_file_name;
-    always_excludes[1] = NULL;
     context.destination_base = destination;
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = root_excludes;
-    callbacks.excluded_always = always_excludes;
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes, excluded_root_directory);
+    callbacks.excluded_always = single_name_exclude_list(always_excludes, excluded_file_name);
     callbacks.context = &context;
     callbacks.on_file = copy_file_visitor;
     callbacks.on_directory_enter = copy_directory_visitor;
@@ -425,11 +451,8 @@ static int delete_directory_contents_recursive(const char *directory,
     walk_callbacks_t callbacks;
     const char *root_excludes[2];
 
-    root_excludes[0] = excluded_root_directory;
-    root_excludes[1] = NULL;
-
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = root_excludes;
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes, excluded_root_directory);
     callbacks.on_file = delete_file_visitor;
     callbacks.on_directory_leave = delete_directory_visitor;
 
@@ -468,18 +491,14 @@ static int directory_has_any_file(const char *directory, int exclude_archive)
 {
     walk_callbacks_t callbacks;
     const char *root_excludes[2];
-    const char *always_excludes[2];
     has_any_file_context_t context;
 
-    root_excludes[0] = exclude_archive ? ARCHIVE_DIRECTORY : NULL;
-    root_excludes[1] = NULL;
-    always_excludes[0] = EXECUTABLE_NAME;
-    always_excludes[1] = NULL;
     context.found = 0;
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = root_excludes;
-    callbacks.excluded_always = always_excludes;
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes,
+                                     exclude_archive ? ARCHIVE_DIRECTORY : NULL);
+    callbacks.excluded_always = excluded_executable;
     callbacks.context = &context;
     callbacks.on_file = has_any_file_visitor;
 
@@ -603,18 +622,14 @@ static int report_new_and_changed_files(const char *current_directory,
 {
     walk_callbacks_t callbacks;
     const char *root_excludes[2];
-    const char *always_excludes[2];
     report_new_context_t context;
 
-    root_excludes[0] = exclude_dosgit ? DOSGIT_DIRECTORY : NULL;
-    root_excludes[1] = NULL;
-    always_excludes[0] = EXECUTABLE_NAME;
-    always_excludes[1] = NULL;
     context.snapshot_base = snapshot_directory;
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = root_excludes;
-    callbacks.excluded_always = always_excludes;
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes,
+                                     exclude_dosgit ? DOSGIT_DIRECTORY : NULL);
+    callbacks.excluded_always = excluded_executable;
     callbacks.context = &context;
     callbacks.on_file = report_new_or_changed_visitor;
 
@@ -663,18 +678,14 @@ static int report_deleted_files(const char *snapshot_directory,
 {
     walk_callbacks_t callbacks;
     const char *root_excludes[2];
-    const char *always_excludes[2];
     report_deleted_context_t context;
 
-    root_excludes[0] = exclude_archive ? ARCHIVE_DIRECTORY : NULL;
-    root_excludes[1] = NULL;
-    always_excludes[0] = EXECUTABLE_NAME;
-    always_excludes[1] = NULL;
     context.current_base = current_directory;
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.excluded_at_root = root_excludes;
-    callbacks.excluded_always = always_excludes;
+    callbacks.excluded_at_root = single_name_exclude_list(root_excludes,
+                                     exclude_archive ? ARCHIVE_DIRECTORY : NULL);
+    callbacks.excluded_always = excluded_executable;
     callbacks.context = &context;
     callbacks.on_file = report_deleted_visitor;
 
